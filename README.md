@@ -1,10 +1,10 @@
 # Distribution is all you need
 
-#### Take-Away
+## Take-Away
 
 笔者使用 PyTorch 编写了不同加速库在 ImageNet 上的使用示例**（单机多卡）**，需要的同学可以当作 quickstart 将需要的部分 copy 到自己的项目中（Github 请点击下面链接）：
 
-1. **[nn.DataParallel ](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/dataparallel.py) ** **简单方便的 nn.DataParallel**
+1. **[nn.DataParallel ](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/dataparallel.py) 简单方便的 nn.DataParallel**
 
 2. **[torch.distributed](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/distributed.py) 使用 torch.distributed 加速并行训练**
 
@@ -20,7 +20,7 @@
 
 简要记录一下不同库的分布式训练方式：
 
-### 简单方便的 nn.DataParallel
+## 简单方便的 nn.DataParallel
 
 > DataParallel 可以帮助我们（使用单进程控）将模型和数据加载到多个 GPU 中，控制数据在 GPU 之间的流动，协同不同 GPU 上的模型进行并行训练（细粒度的方法有 scatter，gather 等等）。
 
