@@ -41,10 +41,10 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N', help='number 
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('-b',
                     '--batch-size',
-                    default=256,
+                    default=3200,
                     type=int,
                     metavar='N',
-                    help='mini-batch size (default: 256), this is the total '
+                    help='mini-batch size (default: 3200), this is the total '
                     'batch size of all GPUs on the current node when '
                     'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr',
@@ -149,7 +149,7 @@ def main_worker(gpus, args):
         validate(val_loader, model, criterion, args)
         return
 
-    log_csv = "multiprocessing_distributed.csv"
+    log_csv = "dataparallel.csv"
 
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start = time.time()

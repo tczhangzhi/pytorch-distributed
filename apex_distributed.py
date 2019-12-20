@@ -23,6 +23,7 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 
 from apex import amp
+from apex.parallel import DistributedDataParallel
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__") and callable(models.__dict__[name]))
@@ -45,10 +46,10 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N', help='number 
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('-b',
                     '--batch-size',
-                    default=256,
+                    default=6400,
                     type=int,
                     metavar='N',
-                    help='mini-batch size (default: 256), this is the total '
+                    help='mini-batch size (default: 6400), this is the total '
                     'batch size of all GPUs on the current node when '
                     'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr',
@@ -173,7 +174,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     model, optimizer = amp.initialize(model,
                                       optimizer)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    model = DistributedDataParallel(model)
 
     cudnn.benchmark = True
 
@@ -296,6 +297,8 @@ def train(train_loader, model, criterion, optimizer, epoch, gpu, args):
 
         i += 1
 
+        images, target = prefetcher.next()
+
 
 def validate(val_loader, model, criterion, gpu, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -312,7 +315,7 @@ def validate(val_loader, model, criterion, gpu, args):
         prefetcher = data_prefetcher(val_loader)
         images, target = prefetcher.next()
         i = 0
-        while input is not None:
+        while images is not None:
 
             # compute output
             output = model(images)
@@ -332,6 +335,8 @@ def validate(val_loader, model, criterion, gpu, args):
                 progress.display(i)
 
             i += 1
+
+            images, target = prefetcher.next()
 
         # TODO: this should also be done with the ProgressMeter
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
