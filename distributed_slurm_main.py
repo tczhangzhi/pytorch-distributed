@@ -42,7 +42,7 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N', help='number 
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
 parser.add_argument('-b',
                     '--batch-size',
-                    default=400,
+                    default=3200,
                     type=int,
                     metavar='N',
                     help='mini-batch size (default: 3200), this is the total '

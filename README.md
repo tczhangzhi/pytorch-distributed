@@ -4,15 +4,13 @@
 
 笔者使用 PyTorch 编写了不同加速库在 ImageNet 上的使用示例（单机多卡），需要的同学可以当作 quickstart 将需要的部分 copy 到自己的项目中（Github 请点击下面链接）：
 
-1. **[nn.DataParallel ](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/dataparallel.py) 简单方便的 nn.DataParallel**
-
-2. **[torch.distributed](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/distributed.py) 使用 torch.distributed 加速并行训练**
-
-3. **[torch.multiprocessing](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/multiprocessing_distributed.py) 使用 torch.multiprocessing 取代启动器**
-
-4. **[apex](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/apex_distributed.py) 使用 apex 再加速**
-
-5. **[horovod](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/horovod_distributed.py)** **horovod 的优雅实现**
+1. **[nn.DataParallel ](https://github.com/tczhangzhi/pytorch-distributed/blob/master/dataparallel.py) 简单方便的 nn.DataParallel**
+2. **[torch.distributed](https://github.com/tczhangzhi/pytorch-distributed/blob/master/distributed.py) 使用 torch.distributed 加速并行训练**
+3. **[torch.multiprocessing](https://github.com/tczhangzhi/pytorch-distributed/blob/master/multiprocessing_distributed.py) 使用 torch.multiprocessing 取代启动器**
+4. **[apex](https://github.com/tczhangzhi/pytorch-distributed/blob/master/apex_distributed.py) 使用 apex 再加速**
+5. **[horovod](https://github.com/tczhangzhi/pytorch-distributed/blob/master/horovod_distributed.py)** **horovod 的优雅实现**
+6. **[slurm](https://github.com/tczhangzhi/pytorch-distributed/blob/master/distributed_slurm_main.py) GPU 集群上的分布式**
+7. **补充：分布式 [evaluation](https://github.com/tczhangzhi/pytorch-distributed/blob/master/distributed.py)**
 
 这里，笔者记录了使用 4 块 Tesla V100-PICE 在 ImageNet 进行了运行时间的测试，测试结果发现 **Apex 的加速效果最好，但与 Horovod/Distributed 差别不大**，平时可以直接使用内置的 Distributed。**Dataparallel 较慢，不推荐使用**。（后续会补上 V100/K80 上的测试结果，穿插了一些试验所以中断了）
 
@@ -470,3 +468,195 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 horovodrun -np 4 -H localhost:4 --verbose python ma
 ```
 
 在 ImageNet 上的完整训练代码，请点击[Github](https://link.zhihu.com/?target=https%3A//github.com/tczhangzhi/pytorch-distributed/blob/master/horovod_distributed.py)。
+
+## GPU 集群上的分布式
+
+> Slurm，是一个用于 Linux 系统的免费、开源的任务调度工具。它提供了三个关键功能。第一，为用户分配资源(计算机节点)，以供用户执行工作。第二，它提供了一个框架，用于执行在节点上运行着的任务(通常是并行的任务)，第三，为任务队列合理地分配资源。如果你还没有部署 Slurm 可以按照笔者总结的[部署教程](https://zhuanlan.zhihu.com/p/149771261)进行部署。
+
+通过运行 slurm 的控制命令，slurm 会将写好的 python 程序在每个节点上分别执行，调用节点上定义的 GPU 资源进行运算。要编写能被 Slurm 在 GPU 集群上执行的 python 分布式训练程序，我们只需要对上文中多线程的 DistributedDataParallel 代码进行修改，告诉每一个执行的任务（每个节点上的 python 程序），要用哪些训练哪一部分数据，反向传播的结果如何合并就可以了。
+
+我们首先需要获得每个任务（对应每个节点）的基本信息，以便针对任务的基本信息处理其应当负责的数据。在使用 slurm 执行 srun python 代码时，python 可以从环境变量 os.environ 中获取当前 python 进程的基本信息：
+
+```
+import os
+local_rank = os.environ['SLURM_PROCID'] # 当前任务的编号（比如节点 1 执行 1 号任务，节点 2 执行 2 号任务）
+world_size = os.environ['SLURM_NPROCS'] # 共开启的任务的总数（共有 2 个节点执行了 2 个任务）
+job_id = os.environ['SLURM_JOBID'] # 当前作业的编号（这是第 1 次执行 srun，编号为 1）
+```
+
+在每个任务（节点）中，我们需要为节点中的每个 GPU 资源分配一个进程，管理该 GPU 应当处理的数据。
+
+当前节点的 GPU 的数量可以由 torch.cuda 查询得到：
+
+```
+ngpus_per_node = torch.cuda.device_count()
+```
+
+接着，与上文相似，我们使用 torch.multiprocessing 创建 ngpus_per_node 个进程，其中，每个进程执行的函数为 main_worker ，该函数调用所需要的由 args 传入：
+
+```
+mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+```
+
+在编写 main_worker 时，我们首先需要解决的问题是：不同节点、或者同一节点间的不同进程之间需要通信来实现数据的分割、参数的合并。我们可以使用 pytorch 的 dist 库在共享文件系统上创建一个文件进行通信：
+
+```
+import torch.distributed as dist
+
+def main_worker(gpu, ngpus_per_node, args):
+  dist_url = "file://dist_file.{}".format(job_id)
+  rank = local_rank * ngpus_per_node + gpu
+  dist.init_process_group(backend='nccl', init_method=dist_url, world_size=world_size, rank=rank)
+  ...
+```
+
+完成进程创建和通信后，下一步就是实现我们常用的 pipline 了，即加载模型、加载数据、正向传播、反向传播。与上文相似，这里，我们把模型加载进当前进程所对应的 GPU 中：
+
+```
+def main_worker(gpu, ngpus_per_node, args):
+  dist_url = "file://dist_file.{}".format(job_id)
+  rank = local_rank * ngpus_per_node + gpu
+  dist.init_process_group(backend='nccl', init_method=dist_url, world_size=world_size, rank=rank)
+  ...
+  torch.cuda.set_device(gpu)
+  model.cuda(gpu)
+  model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+```
+
+接着，把当前进程对应的数据段采样出来，也加载到对应的 GPU 中。同样可以使用 pytorch 的 dist 库实现这个采样过程：
+
+```
+def main_worker(gpu, ngpus_per_node, args):
+  dist_url = "file://dist_file.{}".format(job_id)
+  rank = local_rank * ngpus_per_node + gpu
+  dist.init_process_group(backend='nccl', init_method=dist_url, world_size=world_size, rank=rank)
+  ...
+  torch.cuda.set_device(gpu)
+  model.cuda(gpu)
+  model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+  ...
+  train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+  train_loader = torch.utils.data.DataLoader(train_dataset,
+                                             batch_size=args.batch_size,
+                                             num_workers=2,
+                                             pin_memory=True,
+                                             sampler=train_sampler)
+  for i, (images, target) in enumerate(train_loader):
+    images = images.cuda(gpu, non_blocking=True)
+    target = target.cuda(gpu, non_blocking=True)
+```
+
+最后，进行正常的正向和反向传播：
+
+```
+def main_worker(gpu, ngpus_per_node, args):
+  dist_url = "file://dist_file.{}".format(job_id)
+  rank = local_rank * ngpus_per_node + gpu
+  dist.init_process_group(backend='nccl', init_method=dist_url, world_size=world_size, rank=rank)
+  ...
+  torch.cuda.set_device(gpu)
+  model.cuda(gpu)
+  model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+  ...
+  train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+  train_loader = torch.utils.data.DataLoader(train_dataset,
+                                             batch_size=args.batch_size,
+                                             num_workers=2,
+                                             pin_memory=True,
+                                             sampler=train_sampler)
+  for i, (images, target) in enumerate(train_loader):
+    images = images.cuda(gpu, non_blocking=True)
+    target = target.cuda(gpu, non_blocking=True)
+    ...
+    output = model(images)
+    loss = criterion(output, target)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
+在使用时，调用 srun 启动任务：
+
+```
+srun -N2 --gres gpu:1 python distributed_slurm_main.py --dist-file dist_file
+```
+
+在 ImageNet 上的完整训练代码，请点击[Github](https://github.com/tczhangzhi/pytorch-distributed/blob/master/distributed_slurm_main.py)。
+
+## 分布式 evaluation
+
+> all_reduce, barrier 等 API 是 distributed 中更为基础和底层的 API。这些 API 可以帮助我们控制进程之间的交互，控制 GPU 数据的传输。在自定义 GPU 协作逻辑，汇总 GPU 间少量的统计信息时，大有用处。熟练掌握这些 API 也可以帮助我们自己设计、优化分布式训练、测试流程。
+
+到目前为止，Distributed Sampler 能够帮助我们分发数据，DistributedDataParallel、hvd.broadcast_parameters 能够帮助我们分发模型，并在框架的支持下解决梯度汇总和参数更新的问题。然而，还有一些同学还有这样的疑惑，
+
+1. 训练样本被切分成了若干个部分，被若干个进程分别控制运行在若干个 GPU 上，如何在进程间进行通信汇总这些（GPU 上的）信息？
+2. 使用一张卡进行推理、测试太慢了，如何使用 Distributed 进行分布式地推理和测试，并将结果汇总在一起？
+3. ......
+
+要解决这些问题，我们缺少一个更为基础的 API，**汇总记录不同 GPU 上生成的准确率、损失函数等指标信息**。这个 API 就是 `torch.distributed.all_reduce`。示意图如下：
+
+![img](https://pic4.zhimg.com/80/v2-f424bdc8108abd5421e3af3b902b2ccf_720w.jpg)
+
+具体来说，它的工作过程包含以下三步：
+
+1. 通过调用 `all_reduce(tensor, op=...)`，当前线程会向其他线程发送 `tensor`（例如 rank 0 会发送 rank 0 的 tensor 到 rank 1、2、3）
+2. 接受其他线程发来的 `tensor`（例如 rank 0 会接收 rank 1 的 tensor、rank 2 的 tensor、rank 3 的 tensor）。
+3. 在全部接收完成后，当前线程（例如rank 0）会对当前线程的和接收到的 `tensor` （例如 rank 0 的 tensor、rank 1 的 tensor、rank 2 的 tensor、rank 3 的 tensor）进行 `op` （例如求和）操作。
+
+使用 `torch.distributed.all_reduce(loss, op=torch.distributed.reduce_op.SUM)`，我们就能够对不数据切片（不同 GPU 上的训练数据）的损失函数进行求和了。接着，我们只要再将其除以线程（GPU）数量 `world_size`就可以得到损失函数的平均值。
+
+正确率也能够通过同样方法进行计算：
+
+```
+# 原始代码
+output = model(images)
+loss = criterion(output, target)
+        
+acc1, acc5 = accuracy(output, target, topk=(1, 5))
+losses.update(loss.item(), images.size(0))
+top1.update(acc1.item(), images.size(0))
+top5.update(acc5.item(), images.size(0))
+​
+# 修改后，同步各 GPU 中数据切片的统计信息，用于分布式的 evaluation
+def reduce_tensor(tensor):
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.reduce_op.SUM)
+    rt /= args.world_size
+    return rt
+​
+output = model(images)
+loss = criterion(output, target)
+acc1, acc5 = accuracy(output, target, topk=(1, 5))
+​
+torch.distributed.barrier()
+​
+reduced_loss = reduce_tensor(loss.data)
+reduced_acc1 = reduce_tensor(acc1)
+reduced_acc5 = reduce_tensor(acc5)
+​
+losses.update(loss.item(), images.size(0))
+top1.update(acc1.item(), images.size(0))
+top5.update(acc5.item(), images.size(0))
+```
+
+值得注意的是，为了同步各进程的计算进度，我们在 reduce 之前插入了一个同步 API `torch.distributed.barrier()`。在所有进程运行到这一步之前，先完成此前代码的进程会等待其他进程。这使得我们能够得到准确、有序的输出。在 Horovod 中，我们无法使用 `torch.distributed.barrier()`，取而代之的是，我们可以在 allreduce 过程中指明：
+
+```
+def reduce_mean(tensor, world_size):
+    rt = tensor.clone()
+    hvd.allreduce(rt, name='barrier')
+    rt /= world_size
+    return rt
+    
+output = model(images)
+loss = criterion(output, target)
+acc1, acc5 = accuracy(output, target, topk=(1, 5))
+
+reduced_loss = reduce_tensor(loss.data)
+reduced_acc1 = reduce_tensor(acc1)
+reduced_acc5 = reduce_tensor(acc5)
+
+losses.update(loss.item(), images.size(0))
+top1.update(acc1.item(), images.size(0))
+top5.update(acc5.item(), images.size(0))
+```

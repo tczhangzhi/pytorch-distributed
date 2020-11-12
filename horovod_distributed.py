@@ -1,5 +1,3 @@
-import csv
-
 import argparse
 import os
 import random
@@ -25,7 +23,7 @@ model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__") and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--data', metavar='DIR', default='/home/zhangzhi/Data/ImageNet2012', help='path to dataset')
+parser.add_argument('--data', metavar='DIR', default='/home/zhangzhi/Data/exports/ImageNet2012', help='path to dataset')
 parser.add_argument('-a',
                     '--arch',
                     metavar='ARCH',
@@ -68,11 +66,17 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true', he
 parser.add_argument('--pretrained', dest='pretrained', action='store_true', help='use pre-trained model')
 parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
 
-best_acc1 = 0
+
+def reduce_mean(tensor, world_size):
+    rt = tensor.clone()
+    hvd.allreduce(rt, name='barrier')
+    rt /= world_size
+    return rt
 
 
 def main():
     args = parser.parse_args()
+    args.world_size = torch.cuda.device_count()
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -85,14 +89,14 @@ def main():
                       'from checkpoints.')
 
     hvd.init()
-    local_rank = hvd.local_rank()
-    torch.cuda.set_device(local_rank)
+    args.local_rank = hvd.local_rank()
+    torch.cuda.set_device(args.local_rank)
 
-    main_worker(local_rank, 4, args)
+    main_worker(args.local_rank, args.world_size, args)
 
 
-def main_worker(gpu, ngpus_per_node, args):
-    global best_acc1
+def main_worker(gpu, world_size, args):
+    best_acc1 = .0
 
     # create model
     if args.pretrained:
@@ -106,8 +110,8 @@ def main_worker(gpu, ngpus_per_node, args):
     # When using a single GPU per process and per
     # DistributedDataParallel, we need to divide the batch size
     # ourselves based on the total number of GPUs we have
-    args.batch_size = int(args.batch_size / ngpus_per_node)
-    
+    args.batch_size = int(args.batch_size / world_size)
+
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
 
     # define loss function (criterion) and optimizer
@@ -134,41 +138,39 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms.ToTensor(),
             normalize,
         ]))
-
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset,
                                                                     num_replicas=hvd.size(),
                                                                     rank=hvd.rank())
-
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                batch_size=args.batch_size,
-                                               shuffle=(train_sampler is None),
                                                num_workers=2,
                                                pin_memory=True,
                                                sampler=train_sampler)
 
-    val_loader = torch.utils.data.DataLoader(datasets.ImageFolder(
+    val_dataset = datasets.ImageFolder(
         valdir,
         transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             normalize,
-        ])),
+        ]))
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=hvd.size(), rank=hvd.rank())
+    val_loader = torch.utils.data.DataLoader(val_dataset,
                                              batch_size=args.batch_size,
-                                             shuffle=False,
                                              num_workers=2,
-                                             pin_memory=True)
+                                             pin_memory=True,
+                                             sampler=val_sampler)
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
 
-    log_csv = "horovod_distributed.csv"
-
     for epoch in range(args.start_epoch, args.epochs):
-        epoch_start = time.time()
 
         train_sampler.set_epoch(epoch)
+        val_sampler.set_epoch(epoch)
+
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
@@ -181,20 +183,14 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        epoch_end = time.time()
-
-        with open(log_csv, 'a+') as f:
-            csv_write = csv.writer(f)
-            data_row = [time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch_start)), epoch_end - epoch_start]
-            csv_write.writerow(data_row)
-
-        save_checkpoint(
-            {
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-            }, is_best)
+        if args.local_rank == 0:
+            save_checkpoint(
+                {
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_acc1': best_acc1,
+                }, is_best)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -216,15 +212,21 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
+
         # compute output
         output = model(images)
         loss = criterion(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
+
+        reduced_loss = reduce_mean(loss, args.world_size)
+        reduced_acc1 = reduce_mean(acc1, args.world_size)
+        reduced_acc5 = reduce_mean(acc5, args.world_size)
+
+        losses.update(reduced_loss.item(), images.size(0))
+        top1.update(reduced_acc1.item(), images.size(0))
+        top5.update(reduced_acc5.item(), images.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -254,15 +256,21 @@ def validate(val_loader, model, criterion, args):
         for i, (images, target) in enumerate(val_loader):
             images = images.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
+
             # compute output
             output = model(images)
             loss = criterion(output, target)
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+
+            reduced_loss = reduce_mean(loss, args.world_size)
+            reduced_acc1 = reduce_mean(acc1, args.world_size)
+            reduced_acc5 = reduce_mean(acc5, args.world_size)
+
+            losses.update(reduced_loss.item(), images.size(0))
+            top1.update(reduced_acc1.item(), images.size(0))
+            top5.update(reduced_acc5.item(), images.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
