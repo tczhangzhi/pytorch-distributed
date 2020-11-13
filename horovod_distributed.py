@@ -67,16 +67,16 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true', help
 parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
 
 
-def reduce_mean(tensor, world_size):
+def reduce_mean(tensor, nprocs):
     rt = tensor.clone()
     hvd.allreduce(rt, name='barrier')
-    rt /= world_size
+    rt /= nprocs
     return rt
 
 
 def main():
     args = parser.parse_args()
-    args.world_size = torch.cuda.device_count()
+    args.nprocs = torch.cuda.device_count()
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -92,10 +92,10 @@ def main():
     args.local_rank = hvd.local_rank()
     torch.cuda.set_device(args.local_rank)
 
-    main_worker(args.local_rank, args.world_size, args)
+    main_worker(args.local_rank, args.nprocs, args)
 
 
-def main_worker(gpu, world_size, args):
+def main_worker(local_rank, nprocs, args):
     best_acc1 = .0
 
     # create model
@@ -110,7 +110,7 @@ def main_worker(gpu, world_size, args):
     # When using a single GPU per process and per
     # DistributedDataParallel, we need to divide the batch size
     # ourselves based on the total number of GPUs we have
-    args.batch_size = int(args.batch_size / world_size)
+    args.batch_size = int(args.batch_size / nprocs)
 
     hvd.broadcast_parameters(model.state_dict(), root_rank=0)
 
@@ -220,9 +220,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-        reduced_loss = reduce_mean(loss, args.world_size)
-        reduced_acc1 = reduce_mean(acc1, args.world_size)
-        reduced_acc5 = reduce_mean(acc5, args.world_size)
+        reduced_loss = reduce_mean(loss, args.nprocs)
+        reduced_acc1 = reduce_mean(acc1, args.nprocs)
+        reduced_acc5 = reduce_mean(acc5, args.nprocs)
 
         losses.update(reduced_loss.item(), images.size(0))
         top1.update(reduced_acc1.item(), images.size(0))
@@ -264,9 +264,9 @@ def validate(val_loader, model, criterion, args):
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-            reduced_loss = reduce_mean(loss, args.world_size)
-            reduced_acc1 = reduce_mean(acc1, args.world_size)
-            reduced_acc5 = reduce_mean(acc5, args.world_size)
+            reduced_loss = reduce_mean(loss, args.nprocs)
+            reduced_acc1 = reduce_mean(acc1, args.nprocs)
+            reduced_acc5 = reduce_mean(acc5, args.nprocs)
 
             losses.update(reduced_loss.item(), images.size(0))
             top1.update(reduced_acc1.item(), images.size(0))

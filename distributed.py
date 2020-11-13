@@ -67,16 +67,16 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true', help
 parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
 
 
-def reduce_mean(tensor, world_size):
+def reduce_mean(tensor, nprocs):
     rt = tensor.clone()
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= world_size
+    rt /= nprocs
     return rt
 
 
 def main():
     args = parser.parse_args()
-    args.world_size = torch.cuda.device_count()
+    args.nprocs = torch.cuda.device_count()
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -88,10 +88,10 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    main_worker(args.local_rank, args.world_size, args)
+    main_worker(args.local_rank, args.nprocs, args)
 
 
-def main_worker(gpu, world_size, args):
+def main_worker(local_rank, nprocs, args):
     best_acc1 = .0
 
     dist.init_process_group(backend='nccl')
@@ -103,16 +103,16 @@ def main_worker(gpu, world_size, args):
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
 
-    torch.cuda.set_device(gpu)
-    model.cuda(gpu)
+    torch.cuda.set_device(local_rank)
+    model.cuda(local_rank)
     # When using a single GPU per process and per
     # DistributedDataParallel, we need to divide the batch size
     # ourselves based on the total number of GPUs we have
-    args.batch_size = int(args.batch_size / world_size)
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[gpu])
+    args.batch_size = int(args.batch_size / nprocs)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(gpu)
+    criterion = nn.CrossEntropyLoss().cuda(local_rank)
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
@@ -154,7 +154,7 @@ def main_worker(gpu, world_size, args):
                                              sampler=val_sampler)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, gpu, args)
+        validate(val_loader, model, criterion, local_rank, args)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -164,10 +164,10 @@ def main_worker(gpu, world_size, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, gpu, args)
+        train(train_loader, model, criterion, optimizer, epoch, local_rank, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, gpu, args)
+        acc1 = validate(val_loader, model, criterion, local_rank, args)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -183,7 +183,7 @@ def main_worker(gpu, world_size, args):
                 }, is_best)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, gpu, args):
+def train(train_loader, model, criterion, optimizer, epoch, local_rank, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -200,8 +200,8 @@ def train(train_loader, model, criterion, optimizer, epoch, gpu, args):
         # measure data loading time
         data_time.update(time.time() - end)
 
-        images = images.cuda(gpu, non_blocking=True)
-        target = target.cuda(gpu, non_blocking=True)
+        images = images.cuda(local_rank, non_blocking=True)
+        target = target.cuda(local_rank, non_blocking=True)
 
         # compute output
         output = model(images)
@@ -212,9 +212,9 @@ def train(train_loader, model, criterion, optimizer, epoch, gpu, args):
 
         torch.distributed.barrier()
 
-        reduced_loss = reduce_mean(loss, args.world_size)
-        reduced_acc1 = reduce_mean(acc1, args.world_size)
-        reduced_acc5 = reduce_mean(acc5, args.world_size)
+        reduced_loss = reduce_mean(loss, args.nprocs)
+        reduced_acc1 = reduce_mean(acc1, args.nprocs)
+        reduced_acc5 = reduce_mean(acc5, args.nprocs)
 
         losses.update(reduced_loss.item(), images.size(0))
         top1.update(reduced_acc1.item(), images.size(0))
@@ -233,7 +233,7 @@ def train(train_loader, model, criterion, optimizer, epoch, gpu, args):
             progress.display(i)
 
 
-def validate(val_loader, model, criterion, gpu, args):
+def validate(val_loader, model, criterion, local_rank, args):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -246,8 +246,8 @@ def validate(val_loader, model, criterion, gpu, args):
     with torch.no_grad():
         end = time.time()
         for i, (images, target) in enumerate(val_loader):
-            images = images.cuda(gpu, non_blocking=True)
-            target = target.cuda(gpu, non_blocking=True)
+            images = images.cuda(local_rank, non_blocking=True)
+            target = target.cuda(local_rank, non_blocking=True)
 
             # compute output
             output = model(images)
@@ -258,9 +258,9 @@ def validate(val_loader, model, criterion, gpu, args):
 
             torch.distributed.barrier()
 
-            reduced_loss = reduce_mean(loss, args.world_size)
-            reduced_acc1 = reduce_mean(acc1, args.world_size)
-            reduced_acc5 = reduce_mean(acc5, args.world_size)
+            reduced_loss = reduce_mean(loss, args.nprocs)
+            reduced_acc1 = reduce_mean(acc1, args.nprocs)
+            reduced_acc5 = reduce_mean(acc5, args.nprocs)
 
             losses.update(reduced_loss.item(), images.size(0))
             top1.update(reduced_acc1.item(), images.size(0))
