@@ -70,7 +70,9 @@ parser.add_argument('--seed', default=None, type=int, help='seed for initializin
 def reduce_mean(tensor, nprocs):
     rt = tensor.clone()
     hvd.allreduce(rt, name='barrier')
-    rt /= nprocs
+    # # horovod.allreduce calculates the average value by default
+    # # https://github.com/tczhangzhi/pytorch-distributed/issues/14
+    # rt /= nprocs
     return rt
 
 
