@@ -14,7 +14,7 @@
 
 这里，笔者记录了使用 4 块 Tesla V100-PICE 在 ImageNet 进行了运行时间的测试，测试结果发现 **Apex 的加速效果最好，但与 Horovod/Distributed 差别不大**，平时可以直接使用内置的 Distributed。**Dataparallel 较慢，不推荐使用**。（后续会补上 V100/K80 上的测试结果，穿插了一些试验所以中断了）
 
-![img](https://pic3.zhimg.com/80/v2-9c129a594c73aa8f2085dd17701de0e2_hd.jpg)
+![experimental_results](https://github.com/tczhangzhi/pytorch-distributed/blob/master/assets/fig1_experimental_result.jpg)
 
 简要记录一下不同库的分布式训练方式：
 
@@ -595,7 +595,7 @@ srun -N2 --gres gpu:1 python distributed_slurm_main.py --dist-file dist_file
 
 要解决这些问题，我们缺少一个更为基础的 API，**汇总记录不同 GPU 上生成的准确率、损失函数等指标信息**。这个 API 就是 `torch.distributed.all_reduce`。示意图如下：
 
-![img](https://pic4.zhimg.com/80/v2-f424bdc8108abd5421e3af3b902b2ccf_720w.jpg)
+![all_reduce](https://github.com/tczhangzhi/pytorch-distributed/blob/master/assets/fig2_allreduce.jpg)
 
 具体来说，它的工作过程包含以下三步：
 

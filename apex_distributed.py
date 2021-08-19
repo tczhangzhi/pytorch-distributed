@@ -22,24 +22,37 @@ from apex import amp
 from apex.parallel import DistributedDataParallel
 
 model_names = sorted(name for name in models.__dict__
-                     if name.islower() and not name.startswith("__") and callable(models.__dict__[name]))
+                     if name.islower() and not name.startswith("__")
+                     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('--data', metavar='DIR', default='/home/zhangzhi/Data/exports/ImageNet2012', help='path to dataset')
+parser.add_argument('--data',
+                    metavar='DIR',
+                    default='/home/zhangzhi/Data/exports/ImageNet2012',
+                    help='path to dataset')
 parser.add_argument('-a',
                     '--arch',
                     metavar='ARCH',
                     default='resnet18',
                     choices=model_names,
-                    help='model architecture: ' + ' | '.join(model_names) + ' (default: resnet18)')
+                    help='model architecture: ' + ' | '.join(model_names) +
+                    ' (default: resnet18)')
 parser.add_argument('-j',
                     '--workers',
                     default=4,
                     type=int,
                     metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=90, type=int, metavar='N', help='number of total epochs to run')
-parser.add_argument('--start-epoch', default=0, type=int, metavar='N', help='manual epoch number (useful on restarts)')
+parser.add_argument('--epochs',
+                    default=90,
+                    type=int,
+                    metavar='N',
+                    help='number of total epochs to run')
+parser.add_argument('--start-epoch',
+                    default=0,
+                    type=int,
+                    metavar='N',
+                    help='manual epoch number (useful on restarts)')
 parser.add_argument('-b',
                     '--batch-size',
                     default=3200,
@@ -55,8 +68,15 @@ parser.add_argument('--lr',
                     metavar='LR',
                     help='initial learning rate',
                     dest='lr')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')
-parser.add_argument('--local_rank', default=-1, type=int, help='node rank for distributed training')
+parser.add_argument('--momentum',
+                    default=0.9,
+                    type=float,
+                    metavar='M',
+                    help='momentum')
+parser.add_argument('--local_rank',
+                    default=-1,
+                    type=int,
+                    help='node rank for distributed training')
 parser.add_argument('--wd',
                     '--weight-decay',
                     default=1e-4,
@@ -64,10 +84,25 @@ parser.add_argument('--wd',
                     metavar='W',
                     help='weight decay (default: 1e-4)',
                     dest='weight_decay')
-parser.add_argument('-p', '--print-freq', default=10, type=int, metavar='N', help='print frequency (default: 10)')
-parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true', help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true', help='use pre-trained model')
-parser.add_argument('--seed', default=None, type=int, help='seed for initializing training. ')
+parser.add_argument('-p',
+                    '--print-freq',
+                    default=10,
+                    type=int,
+                    metavar='N',
+                    help='print frequency (default: 10)')
+parser.add_argument('-e',
+                    '--evaluate',
+                    dest='evaluate',
+                    action='store_true',
+                    help='evaluate model on validation set')
+parser.add_argument('--pretrained',
+                    dest='pretrained',
+                    action='store_true',
+                    help='use pre-trained model')
+parser.add_argument('--seed',
+                    default=None,
+                    type=int,
+                    help='seed for initializing training. ')
 
 
 def reduce_mean(tensor, nprocs):
@@ -81,8 +116,10 @@ class data_prefetcher():
     def __init__(self, loader):
         self.loader = iter(loader)
         self.stream = torch.cuda.Stream()
-        self.mean = torch.tensor([0.485 * 255, 0.456 * 255, 0.406 * 255]).cuda().view(1, 3, 1, 1)
-        self.std = torch.tensor([0.229 * 255, 0.224 * 255, 0.225 * 255]).cuda().view(1, 3, 1, 1)
+        self.mean = torch.tensor([0.485 * 255, 0.456 * 255,
+                                  0.406 * 255]).cuda().view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229 * 255, 0.224 * 255,
+                                 0.225 * 255]).cuda().view(1, 3, 1, 1)
         # With Amp, it isn't necessary to manually convert data to half.
         # if args.fp16:
         #     self.mean = self.mean.half()
@@ -171,7 +208,10 @@ def main_worker(local_rank, nprocs, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(model.parameters(),
+                                args.lr,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay)
 
     model, optimizer = amp.initialize(model, optimizer)
     model = DistributedDataParallel(model)
@@ -181,7 +221,8 @@ def main_worker(local_rank, nprocs, args):
     # Data loading code
     traindir = os.path.join(args.data, 'train')
     valdir = os.path.join(args.data, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
 
     train_dataset = datasets.ImageFolder(
         traindir,
@@ -192,7 +233,8 @@ def main_worker(local_rank, nprocs, args):
             normalize,
         ]))
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset)
 
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                batch_size=args.batch_size,
@@ -223,7 +265,8 @@ def main_worker(local_rank, nprocs, args):
         adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, local_rank, args)
+        train(train_loader, model, criterion, optimizer, epoch, local_rank,
+              args)
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, local_rank, args)
@@ -248,7 +291,8 @@ def train(train_loader, model, criterion, optimizer, epoch, local_rank, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-    progress = ProgressMeter(len(train_loader), [batch_time, data_time, losses, top1, top5],
+    progress = ProgressMeter(len(train_loader),
+                             [batch_time, data_time, losses, top1, top5],
                              prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -302,7 +346,8 @@ def validate(val_loader, model, criterion, local_rank, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-    progress = ProgressMeter(len(val_loader), [batch_time, losses, top1, top5], prefix='Test: ')
+    progress = ProgressMeter(len(val_loader), [batch_time, losses, top1, top5],
+                             prefix='Test: ')
 
     # switch to evaluate mode
     model.eval()
@@ -343,7 +388,8 @@ def validate(val_loader, model, criterion, local_rank, args):
             images, target = prefetcher.next()
 
         # TODO: this should also be done with the ProgressMeter
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1,
+                                                                    top5=top5))
 
     return top1.avg
 
